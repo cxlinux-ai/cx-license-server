@@ -308,11 +308,24 @@ async function handleStripeWebhook(request, env) {
           "SELECT id FROM licenses WHERE stripe_subscription_id = ?"
         ).bind(subscriptionId).first();
         if (!existing) {
+          // Get referral code from metadata
+          const referralCode = data.metadata?.referral_code || data.metadata?.ref || null;
+          
           await env.DB.prepare(`
-            INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at, stripe_subscription_id, stripe_customer_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `).bind(licenseKey, tier, `stripe_${customerId}`, customerEmail, systemsAllowed, expiresAt.toISOString(), subscriptionId, customerId).run();
+            INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at, stripe_subscription_id, stripe_customer_id, referral_code)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `).bind(licenseKey, tier, `stripe_${customerId}`, customerEmail, systemsAllowed, expiresAt.toISOString(), subscriptionId, customerId, referralCode).run();
           console.log(`Created license ${licenseKey} for ${customerEmail}`);
+          
+          // Process referral if applicable
+          if (referralCode) {
+            const license = await env.DB.prepare(
+              "SELECT id FROM licenses WHERE license_key = ?"
+            ).bind(licenseKey).first();
+            if (license) {
+              await processReferral(env, license.id, priceId, referralCode);
+            }
+          }
         }
         break;
       }
@@ -436,11 +449,25 @@ var index_default = {
       if (path === "/admin/create-license" && request.method === "POST") {
         return handleCreateLicense(request, env);
       }
+      // Referral endpoints
+      if (path === "/api/v1/referrals/register" && request.method === "POST") {
+        return handleReferralRegister(request, env);
+      }
+      if (path === "/api/v1/referrals/stats" && request.method === "GET") {
+        return handleReferralStats(request, env);
+      }
+      if (path === "/admin/referrals/pending" && request.method === "GET") {
+        return handlePendingPayouts(request, env);
+      }
+      if (path === "/admin/referrals/mark-paid" && request.method === "POST") {
+        return handleMarkPaid(request, env);
+      }
       if (path === "/health" || path === "/") {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.0.0"
+          version: "1.1.0",
+          features: ["licensing", "referrals"]
         });
       }
       return errorResponse("Not found", 404);
@@ -455,3 +482,224 @@ export {
 };
 //# sourceMappingURL=index.js.map
 
+
+// ============================================
+// REFERRAL SYSTEM
+// ============================================
+
+const PRICE_AMOUNTS = {
+  'price_1SqYQjJ4X1wkC4EsLDB6ZbOk': 20,
+  'price_1SqYQjJ4X1wkC4EslIkZEJFZ': 200,
+  'price_1SqYQkJ4X1wkC4Es8OMt79pZ': 99,
+  'price_1SqYQkJ4X1wkC4EsWYwUgceu': 990,
+  'price_1SqYQkJ4X1wkC4EsCFVBHYnT': 299,
+  'price_1SqYQlJ4X1wkC4EsJcPW7Of2': 2990,
+};
+
+const COMMISSION_RATE = 0.10;
+
+function generateReferralCode(name) {
+  const prefix = name ? name.substring(0, 3).toUpperCase() : 'REF';
+  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
+  return `${prefix}-${random}`;
+}
+
+async function handleReferralRegister(request, env) {
+  const body = await request.json();
+  const { email, name, payout_email } = body;
+  
+  if (!email) {
+    return errorResponse('Email is required');
+  }
+  
+  const existing = await env.DB.prepare(
+    'SELECT * FROM referrers WHERE email = ?'
+  ).bind(email).first();
+  
+  if (existing) {
+    return jsonResponse({
+      success: true,
+      message: 'Already registered',
+      referral_code: existing.referral_code,
+      referral_link: `https://cxlinux.com/?ref=${existing.referral_code}`
+    });
+  }
+  
+  const referralCode = generateReferralCode(name);
+  
+  await env.DB.prepare(`
+    INSERT INTO referrers (referral_code, email, name, payout_email)
+    VALUES (?, ?, ?, ?)
+  `).bind(referralCode, email, name || null, payout_email || email).run();
+  
+  return jsonResponse({
+    success: true,
+    referral_code: referralCode,
+    referral_link: `https://cxlinux.com/?ref=${referralCode}`,
+    commission_rate: '10%'
+  });
+}
+
+async function handleReferralStats(request, env) {
+  const url = new URL(request.url);
+  const code = url.searchParams.get('code');
+  const email = url.searchParams.get('email');
+  
+  if (!code && !email) {
+    return errorResponse('code or email is required');
+  }
+  
+  let referrer;
+  if (code) {
+    referrer = await env.DB.prepare(
+      'SELECT * FROM referrers WHERE referral_code = ?'
+    ).bind(code).first();
+  } else {
+    referrer = await env.DB.prepare(
+      'SELECT * FROM referrers WHERE email = ?'
+    ).bind(email).first();
+  }
+  
+  if (!referrer) {
+    return errorResponse('Referrer not found', 404);
+  }
+  
+  const referrals = await env.DB.prepare(`
+    SELECT r.*, l.customer_email, l.tier, l.created_at as license_created
+    FROM referrals r
+    JOIN licenses l ON r.license_id = l.id
+    WHERE r.referrer_id = ?
+    ORDER BY r.created_at DESC
+  `).bind(referrer.id).all();
+  
+  const totalReferrals = referrals.results?.length || 0;
+  const totalEarned = referrals.results?.reduce((sum, r) => sum + r.commission, 0) || 0;
+  const unpaidAmount = referrals.results?.filter(r => !r.paid).reduce((sum, r) => sum + r.commission, 0) || 0;
+  
+  return jsonResponse({
+    referral_code: referrer.referral_code,
+    referral_link: `https://cxlinux.com/?ref=${referrer.referral_code}`,
+    total_referrals: totalReferrals,
+    total_earned: totalEarned.toFixed(2),
+    unpaid_amount: unpaidAmount.toFixed(2),
+    paid_amount: (totalEarned - unpaidAmount).toFixed(2),
+    recent_referrals: (referrals.results || []).slice(0, 10).map(r => ({
+      date: r.created_at,
+      tier: r.tier || 'unknown',
+      commission: r.commission.toFixed(2),
+      paid: r.paid === 1
+    }))
+  });
+}
+
+async function processReferral(env, licenseId, priceId, referralCode) {
+  if (!referralCode) return null;
+  
+  const referrer = await env.DB.prepare(
+    'SELECT * FROM referrers WHERE referral_code = ? AND active = 1'
+  ).bind(referralCode).first();
+  
+  if (!referrer) {
+    console.log(`Referral code ${referralCode} not found`);
+    return null;
+  }
+  
+  const amount = PRICE_AMOUNTS[priceId] || 0;
+  if (amount === 0) {
+    console.log(`Unknown price ID: ${priceId}`);
+    return null;
+  }
+  
+  const commission = amount * COMMISSION_RATE;
+  
+  await env.DB.prepare(`
+    INSERT INTO referrals (referrer_id, license_id, amount_paid, commission)
+    VALUES (?, ?, ?, ?)
+  `).bind(referrer.id, licenseId, amount, commission).run();
+  
+  await env.DB.prepare(`
+    UPDATE referrers SET total_earned = total_earned + ? WHERE id = ?
+  `).bind(commission, referrer.id).run();
+  
+  await env.DB.prepare(`
+    UPDATE licenses SET referral_code = ? WHERE id = ?
+  `).bind(referralCode, licenseId).run();
+  
+  console.log(`Recorded referral: ${referralCode} earned $${commission.toFixed(2)}`);
+  
+  return { referrer_id: referrer.id, commission };
+}
+
+async function handlePendingPayouts(request, env) {
+  const authHeader = request.headers.get('Authorization');
+  const apiKey = authHeader?.replace('Bearer ', '');
+  
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+  
+  const pending = await env.DB.prepare(`
+    SELECT 
+      rr.referral_code,
+      rr.email,
+      rr.payout_email,
+      rr.payout_method,
+      SUM(r.commission) as pending_amount,
+      COUNT(*) as pending_count
+    FROM referrals r
+    JOIN referrers rr ON r.referrer_id = rr.id
+    WHERE r.paid = 0
+    GROUP BY rr.id
+    HAVING pending_amount > 0
+    ORDER BY pending_amount DESC
+  `).all();
+  
+  return jsonResponse({
+    pending_payouts: pending.results || [],
+    total_pending: pending.results?.reduce((sum, p) => sum + p.pending_amount, 0) || 0
+  });
+}
+
+async function handleMarkPaid(request, env) {
+  const authHeader = request.headers.get('Authorization');
+  const apiKey = authHeader?.replace('Bearer ', '');
+  
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+  
+  const body = await request.json();
+  const { referral_code } = body;
+  
+  if (!referral_code) {
+    return errorResponse('referral_code is required');
+  }
+  
+  const referrer = await env.DB.prepare(
+    'SELECT id FROM referrers WHERE referral_code = ?'
+  ).bind(referral_code).first();
+  
+  if (!referrer) {
+    return errorResponse('Referrer not found', 404);
+  }
+  
+  const unpaid = await env.DB.prepare(`
+    SELECT SUM(commission) as amount FROM referrals 
+    WHERE referrer_id = ? AND paid = 0
+  `).bind(referrer.id).first();
+  
+  await env.DB.prepare(`
+    UPDATE referrals SET paid = 1, paid_at = CURRENT_TIMESTAMP
+    WHERE referrer_id = ? AND paid = 0
+  `).bind(referrer.id).run();
+  
+  await env.DB.prepare(`
+    UPDATE referrers SET total_paid = total_paid + ? WHERE id = ?
+  `).bind(unpaid?.amount || 0, referrer.id).run();
+  
+  return jsonResponse({
+    success: true,
+    referral_code,
+    amount_paid: unpaid?.amount || 0
+  });
+}
