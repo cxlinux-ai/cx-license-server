@@ -1,0 +1,15 @@
+name = "cx-license-server"
+main = "src/index.js"
+compatibility_date = "2024-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Production: license.cxlinux.com
+# Staging: license.vibetravel.club
+
+[[d1_databases]]
+binding = "DB"
+database_name = "cx-licenses"
+database_id = "1ad91f25-68cc-4614-8e08-5b56d4a4a522"
+
+[vars]
+ENVIRONMENT = "production"
