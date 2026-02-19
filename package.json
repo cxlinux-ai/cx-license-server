@@ -1,0 +1,29 @@
+{
+  "name": "cx-license-server",
+  "version": "1.2.0",
+  "description": "CX Linux License Server for Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:live": "LICENSE_SERVER_URL=https://license.vibetravel.club vitest run",
+    "db:init": "wrangler d1 execute cx-licenses --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute cx-licenses --local --file=./schema.sql"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20240208.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.2.0",
+    "wrangler": "^3.25.0"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "license",
+    "cx-linux"
+  ],
+  "author": "CX Linux Team",
+  "license": "MIT"
+}
