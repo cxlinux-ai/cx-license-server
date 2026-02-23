@@ -22,6 +22,19 @@ function errorResponse(message, status = 400) {
   return jsonResponse({ error: message, valid: false }, status);
 }
 __name(errorResponse, "errorResponse");
+
+// Normalize email: remove + aliases and lowercase
+// user+test@gmail.com -> user@gmail.com
+function normalizeEmail(email) {
+  if (!email) return email;
+  const lower = email.toLowerCase();
+  const [localPart, domain] = lower.split('@');
+  if (!domain) return lower;
+  // Remove everything after + in local part
+  const normalizedLocal = localPart.split('+')[0];
+  return `${normalizedLocal}@${domain}`;
+}
+__name(normalizeEmail, "normalizeEmail");
 async function logValidation(db, licenseKey, hardwareId, action, success, errorMessage, request) {
   try {
     await db.prepare(`
@@ -577,7 +590,7 @@ async function handleSendOTP(request, env) {
   await env.DB.prepare(`
     INSERT OR REPLACE INTO otp_codes (email, otp, name, expires_at)
     VALUES (?, ?, ?, ?)
-  `).bind(email.toLowerCase(), otp, name || null, expiresAt).run();
+  `).bind(normalizeEmail(email), otp, name || null, expiresAt).run();
   
   // Send OTP email
   const emailSent = await sendOTPEmail(email, name, otp, env);
@@ -603,7 +616,7 @@ async function handleVerifyOTP(request, env) {
   // Get stored OTP
   const stored = await env.DB.prepare(
     'SELECT * FROM otp_codes WHERE email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
   
   if (!stored) {
     return errorResponse('No verification code found. Please request a new one.');
@@ -611,7 +624,7 @@ async function handleVerifyOTP(request, env) {
   
   if (Date.now() > stored.expires_at) {
     // Clean up expired OTP
-    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
     return errorResponse('Verification code expired. Please request a new one.');
   }
   
@@ -622,7 +635,7 @@ async function handleVerifyOTP(request, env) {
   // OTP verified! Now create or get referral code
   const existing = await env.DB.prepare(
     'SELECT * FROM referrers WHERE email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
   
   let referralCode;
   if (existing) {
@@ -632,11 +645,11 @@ async function handleVerifyOTP(request, env) {
     await env.DB.prepare(`
       INSERT INTO referrers (referral_code, email, name, payout_email)
       VALUES (?, ?, ?, ?)
-    `).bind(referralCode, email.toLowerCase(), stored.name || null, email.toLowerCase()).run();
+    `).bind(referralCode, normalizeEmail(email), stored.name || null, normalizeEmail(email)).run();
   }
   
   // Clean up used OTP
-  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
   
   // Send welcome email with referral code
   await sendReferralEmail(email, stored.name, referralCode, env);
@@ -668,7 +681,7 @@ async function handleLicenseSendOTP(request, env) {
   // Check if user already has a license
   const existingLicense = await env.DB.prepare(
     'SELECT * FROM licenses WHERE customer_email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
   
   if (existingLicense) {
     // Return existing license instead of creating new OTP
@@ -688,7 +701,7 @@ async function handleLicenseSendOTP(request, env) {
   await env.DB.prepare(`
     INSERT OR REPLACE INTO otp_codes (email, otp, name, expires_at)
     VALUES (?, ?, ?, ?)
-  `).bind(email.toLowerCase(), otp, name, expiresAt).run();
+  `).bind(normalizeEmail(email), otp, name, expiresAt).run();
   
   // Send OTP email
   const emailSent = await sendLicenseOTPEmail(email, name, otp, env);
@@ -748,14 +761,14 @@ async function handleLicenseVerifyOTP(request, env) {
   // Get stored OTP
   const stored = await env.DB.prepare(
     'SELECT * FROM otp_codes WHERE email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
   
   if (!stored) {
     return errorResponse('No verification code found. Please request a new one.');
   }
   
   if (Date.now() > stored.expires_at) {
-    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
     return errorResponse('Verification code expired. Please request a new one.');
   }
   
@@ -766,10 +779,10 @@ async function handleLicenseVerifyOTP(request, env) {
   // Check if user already has a license (race condition check)
   const existingLicense = await env.DB.prepare(
     'SELECT * FROM licenses WHERE customer_email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
   
   if (existingLicense) {
-    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
     return jsonResponse({
       success: true,
       existing: true,
@@ -787,10 +800,10 @@ async function handleLicenseVerifyOTP(request, env) {
   await env.DB.prepare(`
     INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at)
     VALUES (?, 'core', ?, ?, 1, ?)
-  `).bind(licenseKey, email.toLowerCase(), email.toLowerCase(), expiresAt.toISOString()).run();
+  `).bind(licenseKey, normalizeEmail(email), normalizeEmail(email), expiresAt.toISOString()).run();
   
   // Clean up used OTP
-  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
   
   // Send welcome email with license key
   await sendLicenseWelcomeEmail(email, stored.name, licenseKey, env);
@@ -1295,7 +1308,7 @@ async function handleAdminCreateReferrer(request, env) {
 
   const existing = await env.DB.prepare(
     'SELECT * FROM referrers WHERE email = ?'
-  ).bind(email.toLowerCase()).first();
+  ).bind(normalizeEmail(email)).first();
 
   if (existing) {
     return errorResponse('Email already registered with code: ' + existing.referral_code);
@@ -1317,12 +1330,12 @@ async function handleAdminCreateReferrer(request, env) {
   await env.DB.prepare(`
     INSERT INTO referrers (referral_code, email, name, payout_email)
     VALUES (?, ?, ?, ?)
-  `).bind(referralCode, email.toLowerCase(), name || null, email.toLowerCase()).run();
+  `).bind(referralCode, normalizeEmail(email), name || null, normalizeEmail(email)).run();
 
   return jsonResponse({
     success: true,
     referral_code: referralCode,
-    email: email.toLowerCase()
+    email: normalizeEmail(email)
   });
 }
 
@@ -1364,7 +1377,7 @@ async function handleAdminUpdateReferrer(request, env, code) {
 
   if (payout_email) {
     updates.push('payout_email = ?');
-    values.push(payout_email.toLowerCase());
+    values.push(payout_normalizeEmail(email));
   }
 
   if (updates.length === 0) {
