@@ -1,5 +1,5 @@
 // CX Linux License Server with Referral System
-// Version 1.2.1
+// Version 1.3.0
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -11,6 +11,7 @@ interface Env {
   DB: D1Database;
   STRIPE_WEBHOOK_SECRET: string;
   ADMIN_API_KEY: string;
+  RESEND_API_KEY: string;
 }
 
 // ============================================
@@ -711,6 +712,212 @@ async function handleCreateLicense(request: Request, env: Env) {
 }
 
 // ============================================
+// OTP HELPERS
+// ============================================
+function generateOtp(): string {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function sendOtpEmail(email: string, otp: string, type: 'license' | 'referral', env: Env): Promise<boolean> {
+  const subject = type === 'license' 
+    ? 'Your CX Linux License Verification Code'
+    : 'Your CX Linux Affiliate Verification Code';
+  
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+      <h2 style="color: #00FF9F;">CX Linux</h2>
+      <p>Your verification code is:</p>
+      <div style="background: #1E1E1E; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+        <span style="font-size: 32px; font-family: monospace; color: #00FF9F; letter-spacing: 8px;">${otp}</span>
+      </div>
+      <p style="color: #666;">This code expires in 10 minutes.</p>
+      <p style="color: #666; font-size: 12px;">If you didn't request this code, you can safely ignore this email.</p>
+    </div>
+  `;
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject,
+        html
+      })
+    });
+    return res.ok;
+  } catch (e) {
+    console.error('Failed to send OTP email:', e);
+    return false;
+  }
+}
+
+// ============================================
+// LICENSE OTP HANDLERS
+// ============================================
+async function handleLicenseSendOtp(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { email, name } = body;
+
+  if (!email) {
+    return errorResponse("Email is required");
+  }
+
+  const otp = generateOtp();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  // Delete any existing OTP for this email
+  await env.DB.prepare("DELETE FROM otp_codes WHERE email = ? AND type = 'license'").bind(email).run();
+
+  // Insert new OTP
+  await env.DB.prepare(
+    "INSERT INTO otp_codes (email, otp, name, type, expires_at) VALUES (?, ?, ?, 'license', ?)"
+  ).bind(email, otp, name || null, expiresAt.toISOString()).run();
+
+  // Send email
+  const sent = await sendOtpEmail(email, otp, 'license', env);
+  if (!sent) {
+    return errorResponse("Failed to send verification email", 500);
+  }
+
+  return jsonResponse({ success: true, message: "Verification code sent" });
+}
+
+async function handleLicenseVerifyOtp(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { email, otp } = body;
+
+  if (!email || !otp) {
+    return errorResponse("Email and OTP are required");
+  }
+
+  const record = await env.DB.prepare(
+    "SELECT * FROM otp_codes WHERE email = ? AND otp = ? AND type = 'license' AND expires_at > datetime('now')"
+  ).bind(email, otp).first<any>();
+
+  if (!record) {
+    return errorResponse("Invalid or expired verification code", 401);
+  }
+
+  // Delete used OTP
+  await env.DB.prepare("DELETE FROM otp_codes WHERE email = ? AND type = 'license'").bind(email).run();
+
+  // Check if license already exists for this email
+  let license = await env.DB.prepare(
+    "SELECT * FROM licenses WHERE customer_email = ? AND tier = 'core' AND active = 1"
+  ).bind(email).first<any>();
+
+  if (license) {
+    return jsonResponse({
+      success: true,
+      license_key: license.license_key,
+      tier: license.tier,
+      message: "Existing license retrieved"
+    });
+  }
+
+  // Create new free Core license
+  const licenseKey = `CX-CORE-${generateRandomString(4)}-${generateRandomString(4)}-${generateRandomString(4)}-${generateRandomString(4)}`;
+  const customerId = `cust_${generateRandomString(16)}`;
+  const expiresAt = new Date();
+  expiresAt.setFullYear(expiresAt.getFullYear() + 100); // Effectively never expires for free tier
+
+  await env.DB.prepare(`
+    INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at, active)
+    VALUES (?, 'core', ?, ?, 3, ?, 1)
+  `).bind(licenseKey, customerId, email, expiresAt.toISOString()).run();
+
+  return jsonResponse({
+    success: true,
+    license_key: licenseKey,
+    tier: "core",
+    message: "License created successfully"
+  });
+}
+
+// ============================================
+// REFERRAL OTP HANDLERS
+// ============================================
+async function handleReferralSendOtp(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { email, name } = body;
+
+  if (!email) {
+    return errorResponse("Email is required");
+  }
+
+  const otp = generateOtp();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  // Delete any existing OTP for this email
+  await env.DB.prepare("DELETE FROM otp_codes WHERE email = ? AND type = 'referral'").bind(email).run();
+
+  // Insert new OTP
+  await env.DB.prepare(
+    "INSERT INTO otp_codes (email, otp, name, type, expires_at) VALUES (?, ?, ?, 'referral', ?)"
+  ).bind(email, otp, name || null, expiresAt.toISOString()).run();
+
+  // Send email
+  const sent = await sendOtpEmail(email, otp, 'referral', env);
+  if (!sent) {
+    return errorResponse("Failed to send verification email", 500);
+  }
+
+  return jsonResponse({ success: true, message: "Verification code sent" });
+}
+
+async function handleReferralVerifyOtp(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { email, otp } = body;
+
+  if (!email || !otp) {
+    return errorResponse("Email and OTP are required");
+  }
+
+  const record = await env.DB.prepare(
+    "SELECT * FROM otp_codes WHERE email = ? AND otp = ? AND type = 'referral' AND expires_at > datetime('now')"
+  ).bind(email, otp).first<any>();
+
+  if (!record) {
+    return errorResponse("Invalid or expired verification code", 401);
+  }
+
+  // Delete used OTP
+  await env.DB.prepare("DELETE FROM otp_codes WHERE email = ? AND type = 'referral'").bind(email).run();
+
+  // Check if referral code already exists for this email
+  let referrer = await env.DB.prepare(
+    "SELECT * FROM referrers WHERE email = ?"
+  ).bind(email).first<any>();
+
+  if (referrer) {
+    return jsonResponse({
+      success: true,
+      referral_code: referrer.referral_code,
+      message: "Existing referral code retrieved"
+    });
+  }
+
+  // Create new referral code
+  const referralCode = generateReferralCode(record.name);
+  
+  await env.DB.prepare(`
+    INSERT INTO referrers (referral_code, email, name, payout_email, created_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+  `).bind(referralCode, email, record.name || null, email).run();
+
+  return jsonResponse({
+    success: true,
+    referral_code: referralCode,
+    message: "Referral code created successfully"
+  });
+}
+
+// ============================================
 // MAIN ROUTER
 // ============================================
 export default {
@@ -737,12 +944,28 @@ export default {
         return handleStatus(request, env);
       }
 
+      // License OTP endpoints
+      if (path === "/api/v1/licenses/send-otp" && request.method === "POST") {
+        return handleLicenseSendOtp(request, env);
+      }
+      if (path === "/api/v1/licenses/verify-otp" && request.method === "POST") {
+        return handleLicenseVerifyOtp(request, env);
+      }
+
       // Referral endpoints
       if (path === "/api/v1/referrals/register" && request.method === "POST") {
         return handleReferralRegister(request, env);
       }
       if (path === "/api/v1/referrals/stats" && request.method === "GET") {
         return handleReferralStats(request, env);
+      }
+
+      // Referral OTP endpoints
+      if (path === "/api/v1/referrals/send-otp" && request.method === "POST") {
+        return handleReferralSendOtp(request, env);
+      }
+      if (path === "/api/v1/referrals/verify-otp" && request.method === "POST") {
+        return handleReferralVerifyOtp(request, env);
       }
 
       // Webhook
@@ -766,8 +989,8 @@ export default {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.2.1",
-          features: ["licensing", "referrals", "stripe-webhooks"],
+          version: "1.3.0",
+          features: ["licensing", "referrals", "stripe-webhooks", "otp-verification"],
           timestamp: new Date().toISOString()
         });
       }
