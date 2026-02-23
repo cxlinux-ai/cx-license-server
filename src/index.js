@@ -469,6 +469,21 @@ var index_default = {
       if (path === "/admin/referrals/mark-paid" && request.method === "POST") {
         return handleMarkPaid(request, env);
       }
+      // Admin Referrer Management
+      if (path === "/admin/referrers" && request.method === "GET") {
+        return handleAdminListReferrers(request, env);
+      }
+      if (path === "/admin/referrers" && request.method === "POST") {
+        return handleAdminCreateReferrer(request, env);
+      }
+      if (path.startsWith("/admin/referrers/") && request.method === "PATCH") {
+        const code = path.split("/")[3];
+        return handleAdminUpdateReferrer(request, env, code);
+      }
+      if (path.startsWith("/admin/referrers/") && request.method === "DELETE") {
+        const code = path.split("/")[3];
+        return handleAdminDeleteReferrer(request, env, code);
+      }
       if (path === "/health" || path === "/") {
         return jsonResponse({
           status: "ok",
@@ -911,4 +926,155 @@ async function handleMarkPaid(request, env) {
     referral_code,
     amount_paid: unpaid?.amount || 0
   });
+}
+
+// ============================================
+// ADMIN REFERRER MANAGEMENT
+// ============================================
+
+async function handleAdminListReferrers(request, env) {
+  const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+
+  const url = new URL(request.url);
+  const limit = parseInt(url.searchParams.get('limit')) || 50;
+  const offset = parseInt(url.searchParams.get('offset')) || 0;
+
+  const results = await env.DB.prepare(`
+    SELECT r.referral_code, r.email, r.name, r.payout_email, r.created_at,
+      (SELECT COUNT(*) FROM referrals WHERE referrer_id = r.id) as total_referrals,
+      (SELECT COALESCE(SUM(commission_amount), 0) FROM referrals WHERE referrer_id = r.id AND paid = 0) as pending_commission,
+      (SELECT COALESCE(SUM(commission_amount), 0) FROM referrals WHERE referrer_id = r.id AND paid = 1) as paid_commission
+    FROM referrers r
+    ORDER BY r.created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(limit, offset).all();
+
+  const countResult = await env.DB.prepare('SELECT COUNT(*) as total FROM referrers').first();
+
+  return jsonResponse({
+    success: true,
+    referrers: results.results,
+    total: countResult.total,
+    limit,
+    offset
+  });
+}
+
+async function handleAdminCreateReferrer(request, env) {
+  const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+
+  const body = await request.json();
+  const { email, name, code } = body;
+
+  if (!email) {
+    return errorResponse('Email is required');
+  }
+
+  const existing = await env.DB.prepare(
+    'SELECT * FROM referrers WHERE email = ?'
+  ).bind(email.toLowerCase()).first();
+
+  if (existing) {
+    return errorResponse('Email already registered with code: ' + existing.referral_code);
+  }
+
+  let referralCode = code;
+  if (!referralCode) {
+    referralCode = await generateUniqueReferralCode(env);
+  } else {
+    const codeExists = await env.DB.prepare(
+      'SELECT 1 FROM referrers WHERE referral_code = ?'
+    ).bind(referralCode.toUpperCase()).first();
+    if (codeExists) {
+      return errorResponse('Code already in use');
+    }
+    referralCode = referralCode.toUpperCase();
+  }
+
+  await env.DB.prepare(`
+    INSERT INTO referrers (referral_code, email, name, payout_email)
+    VALUES (?, ?, ?, ?)
+  `).bind(referralCode, email.toLowerCase(), name || null, email.toLowerCase()).run();
+
+  return jsonResponse({
+    success: true,
+    referral_code: referralCode,
+    email: email.toLowerCase()
+  });
+}
+
+async function handleAdminUpdateReferrer(request, env, code) {
+  const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+
+  const body = await request.json();
+  const { new_code, name, payout_email } = body;
+
+  const existing = await env.DB.prepare(
+    'SELECT * FROM referrers WHERE referral_code = ?'
+  ).bind(code.toUpperCase()).first();
+
+  if (!existing) {
+    return errorResponse('Referrer not found', 404);
+  }
+
+  const updates = [];
+  const values = [];
+
+  if (new_code) {
+    const codeExists = await env.DB.prepare(
+      'SELECT 1 FROM referrers WHERE referral_code = ? AND id != ?'
+    ).bind(new_code.toUpperCase(), existing.id).first();
+    if (codeExists) {
+      return errorResponse('New code already in use');
+    }
+    updates.push('referral_code = ?');
+    values.push(new_code.toUpperCase());
+  }
+
+  if (name !== undefined) {
+    updates.push('name = ?');
+    values.push(name);
+  }
+
+  if (payout_email) {
+    updates.push('payout_email = ?');
+    values.push(payout_email.toLowerCase());
+  }
+
+  if (updates.length === 0) {
+    return errorResponse('No updates provided');
+  }
+
+  values.push(existing.id);
+  await env.DB.prepare(
+    `UPDATE referrers SET ${updates.join(', ')} WHERE id = ?`
+  ).bind(...values).run();
+
+  return jsonResponse({ success: true, message: 'Referrer updated' });
+}
+
+async function handleAdminDeleteReferrer(request, env, code) {
+  const apiKey = request.headers.get('Authorization')?.replace('Bearer ', '');
+  if (!env.ADMIN_API_KEY || apiKey !== env.ADMIN_API_KEY) {
+    return errorResponse('Unauthorized', 401);
+  }
+
+  const result = await env.DB.prepare(
+    'DELETE FROM referrers WHERE referral_code = ?'
+  ).bind(code.toUpperCase()).run();
+
+  if (result.changes === 0) {
+    return errorResponse('Referrer not found', 404);
+  }
+
+  return jsonResponse({ success: true, message: 'Referrer deleted' });
 }
