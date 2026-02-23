@@ -450,6 +450,13 @@ var index_default = {
         return handleCreateLicense(request, env);
       }
       // Referral endpoints
+      // OTP Verification Flow
+      if (path === "/api/v1/referrals/send-otp" && request.method === "POST") {
+        return handleSendOTP(request, env);
+      }
+      if (path === "/api/v1/referrals/verify-otp" && request.method === "POST") {
+        return handleVerifyOTP(request, env);
+      }
       if (path === "/api/v1/referrals/register" && request.method === "POST") {
         return handleReferralRegister(request, env);
       }
@@ -482,6 +489,137 @@ export {
 };
 //# sourceMappingURL=index.js.map
 
+
+
+
+// ============================================
+// OTP VERIFICATION SYSTEM
+// ============================================
+
+function generateOTP() {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+async function sendOTPEmail(email, name, otp, env) {
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: 'Your CX Linux Verification Code',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #00FF9F;">Verify Your Email</h1>
+            <p>Hi ${name || 'there'},</p>
+            <p>Your verification code for CX Linux Affiliates is:</p>
+            <div style="background: #1E1E1E; padding: 30px; border-radius: 8px; text-align: center; margin: 20px 0;">
+              <span style="font-size: 36px; font-weight: bold; color: #00FF9F; font-family: monospace; letter-spacing: 8px;">${otp}</span>
+            </div>
+            <p style="color: #666;">This code expires in 10 minutes.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="color: #666; font-size: 12px;">CX Linux - AI-Native Terminal</p>
+          </div>
+        `
+      })
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('Failed to send OTP email:', e);
+    return false;
+  }
+}
+
+async function handleSendOTP(request, env) {
+  const body = await request.json();
+  const { email, name } = body;
+  
+  if (!email) {
+    return errorResponse('Email is required');
+  }
+  
+  const otp = generateOTP();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+  
+  // Store OTP in database
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO otp_codes (email, otp, name, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(email.toLowerCase(), otp, name || null, expiresAt).run();
+  
+  // Send OTP email
+  const emailSent = await sendOTPEmail(email, name, otp, env);
+  
+  if (!emailSent) {
+    return errorResponse('Failed to send verification email');
+  }
+  
+  return jsonResponse({
+    success: true,
+    message: 'Verification code sent to your email'
+  });
+}
+
+async function handleVerifyOTP(request, env) {
+  const body = await request.json();
+  const { email, otp } = body;
+  
+  if (!email || !otp) {
+    return errorResponse('Email and OTP are required');
+  }
+  
+  // Get stored OTP
+  const stored = await env.DB.prepare(
+    'SELECT * FROM otp_codes WHERE email = ?'
+  ).bind(email.toLowerCase()).first();
+  
+  if (!stored) {
+    return errorResponse('No verification code found. Please request a new one.');
+  }
+  
+  if (Date.now() > stored.expires_at) {
+    // Clean up expired OTP
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    return errorResponse('Verification code expired. Please request a new one.');
+  }
+  
+  if (stored.otp !== otp) {
+    return errorResponse('Invalid verification code');
+  }
+  
+  // OTP verified! Now create or get referral code
+  const existing = await env.DB.prepare(
+    'SELECT * FROM referrers WHERE email = ?'
+  ).bind(email.toLowerCase()).first();
+  
+  let referralCode;
+  if (existing) {
+    referralCode = existing.referral_code;
+  } else {
+    referralCode = generateReferralCode(stored.name);
+    await env.DB.prepare(`
+      INSERT INTO referrers (referral_code, email, name, payout_email)
+      VALUES (?, ?, ?, ?)
+    `).bind(referralCode, email.toLowerCase(), stored.name || null, email.toLowerCase()).run();
+  }
+  
+  // Clean up used OTP
+  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+  
+  // Send welcome email with referral code
+  await sendReferralEmail(email, stored.name, referralCode, env);
+  
+  return jsonResponse({
+    success: true,
+    referral_code: referralCode,
+    referral_link: `https://cxlinux.com/?ref=${referralCode}`,
+    commission_rate: '10%'
+  });
+}
 
 // ============================================
 // REFERRAL SYSTEM
