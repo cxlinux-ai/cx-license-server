@@ -697,8 +697,9 @@ function generateReferralCode() {
   
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
   const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
+  const num = Math.floor(Math.random() * 100).toString().padStart(2, '0');
   
-  return `${prefix}-${suffix}`;
+  return `${prefix}-${suffix}-${num}`;
 }
 
 
