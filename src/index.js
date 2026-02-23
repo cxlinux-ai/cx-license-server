@@ -600,7 +600,7 @@ async function handleVerifyOTP(request, env) {
   if (existing) {
     referralCode = existing.referral_code;
   } else {
-    referralCode = generateReferralCode(stored.name);
+    referralCode = generateReferralCode();
     await env.DB.prepare(`
       INSERT INTO referrers (referral_code, email, name, payout_email)
       VALUES (?, ?, ?, ?)
@@ -681,10 +681,24 @@ async function sendReferralEmail(email, name, referralCode, env) {
 }
 
 
-function generateReferralCode(name) {
-  const prefix = name ? name.substring(0, 3).toUpperCase() : 'REF';
-  const random = Math.random().toString(36).substring(2, 8).toUpperCase();
-  return `${prefix}-${random}`;
+function generateReferralCode() {
+  const prefixes = [
+    'SUDO', 'ROOT', 'BASH', 'GREP', 'PIPE', 'CHMOD', 
+    'KERNEL', 'SHELL', 'FORK', 'DAEMON', 'INIT', 'NANO',
+    'VIM', 'APT', 'SSH', 'GIT', 'CURL', 'TAR', 'AWK', 'SED'
+  ];
+  
+  const suffixes = [
+    'WOLF', 'HAWK', 'PANDA', 'TIGER', 'DRAGON', 'PHOENIX',
+    'FALCON', 'COBRA', 'LYNX', 'FOX', 'RAVEN', 'OWL',
+    'BEAR', 'SHARK', 'NINJA', 'STORM', 'BLAZE', 'FROST',
+    'VIPER', 'EAGLE', 'LION', 'PANTHER', 'RAPTOR', 'KRAKEN'
+  ];
+  
+  const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
+  const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
+  
+  return `${prefix}-${suffix}`;
 }
 
 
@@ -710,7 +724,7 @@ async function handleReferralRegister(request, env) {
     });
   }
   
-  const referralCode = generateReferralCode(name);
+  const referralCode = generateReferralCode();
   
   await env.DB.prepare(`
     INSERT INTO referrers (referral_code, email, name, payout_email)
