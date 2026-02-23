@@ -943,12 +943,9 @@ async function handleAdminListReferrers(request, env) {
   const offset = parseInt(url.searchParams.get('offset')) || 0;
 
   const results = await env.DB.prepare(`
-    SELECT r.referral_code, r.email, r.name, r.payout_email, r.created_at,
-      (SELECT COUNT(*) FROM referrals WHERE referrer_id = r.id) as total_referrals,
-      (SELECT COALESCE(SUM(commission_amount), 0) FROM referrals WHERE referrer_id = r.id AND paid = 0) as pending_commission,
-      (SELECT COALESCE(SUM(commission_amount), 0) FROM referrals WHERE referrer_id = r.id AND paid = 1) as paid_commission
-    FROM referrers r
-    ORDER BY r.created_at DESC
+    SELECT referral_code, email, name, payout_email, total_earned, total_paid, created_at
+    FROM referrers
+    ORDER BY created_at DESC
     LIMIT ? OFFSET ?
   `).bind(limit, offset).all();
 
