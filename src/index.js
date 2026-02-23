@@ -35,6 +35,66 @@ function normalizeEmail(email) {
   return `${normalizedLocal}@${domain}`;
 }
 __name(normalizeEmail, "normalizeEmail");
+
+// ============================================
+// ANTI-ABUSE MEASURES
+// ============================================
+
+// Disposable email domains to block
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  'mailinator.com', 'tempmail.com', 'throwaway.email', 'guerrillamail.com',
+  'sharklasers.com', 'guerrillamail.info', 'grr.la', 'guerrillamail.biz',
+  'guerrillamail.de', 'guerrillamail.net', 'guerrillamail.org', 'spam4.me',
+  'pokemail.net', 'dispostable.com', 'yopmail.com', 'yopmail.fr', 'yopmail.net',
+  'cool.fr.nf', 'jetable.fr.nf', 'nospam.ze.tc', 'nomail.xl.cx', 'mega.zik.dj',
+  'speed.1s.fr', 'courriel.fr.nf', 'moncourrier.fr.nf', 'monemail.fr.nf',
+  'monmail.fr.nf', '10minutemail.com', '10minutemail.net', 'tempinbox.com',
+  'fakeinbox.com', 'trashmail.com', 'trashmail.net', 'mailnesia.com',
+  'maildrop.cc', 'getnada.com', 'temp-mail.org', 'emailondeck.com',
+  'disposableemailaddresses.com', 'mintemail.com', 'spamgourmet.com',
+  'mytrashmail.com', 'mailcatch.com', 'mailnull.com', 'spamherelots.com',
+  'thisisnotmyrealemail.com', 'dodgeit.com', 'e4ward.com', 'spamex.com',
+  'mailmoat.com', 'spamcero.com', 'wh4f.org', 'mailexpire.com', 'tempail.com',
+  'discard.email', 'discardmail.com', 'spambog.com', 'spamavert.com',
+  'mailforspam.com', 'spamfree24.org', 'objectmail.com', 'proxymail.eu',
+  'rcpt.at', 'trash-mail.at', 'wegwerfmail.de', 'wegwerfmail.net',
+  'wegwerfmail.org', 'emailsensei.com', 'temp.email', 'tempmailo.com'
+]);
+
+// Check if email domain is disposable
+function isDisposableEmail(email) {
+  if (!email) return false;
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain && DISPOSABLE_EMAIL_DOMAINS.has(domain);
+}
+__name(isDisposableEmail, "isDisposableEmail");
+
+// Check IP rate limit (max registrations per day)
+async function checkIPRateLimit(db, ip, maxPerDay = 3) {
+  const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+  const result = await db.prepare(`
+    SELECT COUNT(*) as count FROM licenses 
+    WHERE created_at > datetime(?, 'unixepoch') 
+    AND customer_id LIKE ?
+  `).bind(Math.floor(oneDayAgo / 1000), `%ip:${ip}%`).first();
+  
+  return (result?.count || 0) < maxPerDay;
+}
+__name(checkIPRateLimit, "checkIPRateLimit");
+
+// Log registration attempt with IP
+async function logRegistration(db, email, ip, success, reason) {
+  try {
+    await db.prepare(`
+      INSERT INTO validation_log (license_key, hardware_id, action, success, error_message, ip_address, user_agent)
+      VALUES (?, ?, 'register', ?, ?, ?, ?)
+    `).bind(email, '', success ? 1 : 0, reason, ip, 'web').run();
+  } catch (e) {
+    console.error("Failed to log registration:", e);
+  }
+}
+__name(logRegistration, "logRegistration");
+
 async function logValidation(db, licenseKey, hardwareId, action, success, errorMessage, request) {
   try {
     await db.prepare(`
@@ -669,6 +729,7 @@ async function handleVerifyOTP(request, env) {
 async function handleLicenseSendOTP(request, env) {
   const body = await request.json();
   const { email, name } = body;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   
   if (!email) {
     return errorResponse('Email is required');
@@ -676,6 +737,19 @@ async function handleLicenseSendOTP(request, env) {
   
   if (!name) {
     return errorResponse('Name is required');
+  }
+  
+  // Anti-abuse: Check for disposable email
+  if (isDisposableEmail(email)) {
+    await logRegistration(env.DB, email, ip, false, 'Disposable email blocked');
+    return errorResponse('Please use a permanent email address. Temporary/disposable emails are not allowed.');
+  }
+  
+  // Anti-abuse: Check IP rate limit (max 3 registrations per day per IP)
+  const ipAllowed = await checkIPRateLimit(env.DB, ip, 3);
+  if (!ipAllowed) {
+    await logRegistration(env.DB, email, ip, false, 'IP rate limit exceeded');
+    return errorResponse('Too many registration attempts from this IP address. Please try again tomorrow.');
   }
   
   // Check if user already has a license
@@ -753,6 +827,7 @@ async function sendLicenseOTPEmail(email, name, otp, env) {
 async function handleLicenseVerifyOTP(request, env) {
   const body = await request.json();
   const { email, otp } = body;
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
   
   if (!email || !otp) {
     return errorResponse('Email and verification code are required');
@@ -797,10 +872,16 @@ async function handleLicenseVerifyOTP(request, env) {
   const expiresAt = new Date();
   expiresAt.setFullYear(expiresAt.getFullYear() + 100); // Free tier never expires (effectively)
   
+  // Store IP in customer_id for rate limiting tracking (format: email|ip:xxx.xxx.xxx.xxx)
+  const customerId = `${normalizeEmail(email)}|ip:${ip}`;
+  
   await env.DB.prepare(`
     INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at)
     VALUES (?, 'core', ?, ?, 1, ?)
-  `).bind(licenseKey, normalizeEmail(email), normalizeEmail(email), expiresAt.toISOString()).run();
+  `).bind(licenseKey, customerId, normalizeEmail(email), expiresAt.toISOString()).run();
+  
+  // Log successful registration
+  await logRegistration(env.DB, normalizeEmail(email), ip, true, 'Free license created');
   
   // Clean up used OTP
   await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(normalizeEmail(email)).run();
