@@ -600,7 +600,7 @@ async function handleVerifyOTP(request, env) {
   if (existing) {
     referralCode = existing.referral_code;
   } else {
-    referralCode = generateReferralCode();
+    referralCode = await generateUniqueReferralCode(env);
     await env.DB.prepare(`
       INSERT INTO referrers (referral_code, email, name, payout_email)
       VALUES (?, ?, ?, ?)
@@ -684,22 +684,36 @@ async function sendReferralEmail(email, name, referralCode, env) {
 function generateReferralCode() {
   const prefixes = [
     'SUDO', 'ROOT', 'BASH', 'GREP', 'PIPE', 'CHMOD', 
-    'KERNEL', 'SHELL', 'FORK', 'DAEMON', 'INIT', 'NANO',
-    'VIM', 'APT', 'SSH', 'GIT', 'CURL', 'TAR', 'AWK', 'SED'
+    'KERNEL', 'SHELL', 'FORK', 'DAEMON', 'NANO',
+    'VIM', 'APT', 'SSH', 'GIT', 'CURL', 'TAR', 'AWK'
   ];
   
-  const suffixes = [
-    'WOLF', 'HAWK', 'PANDA', 'TIGER', 'DRAGON', 'PHOENIX',
-    'FALCON', 'COBRA', 'LYNX', 'FOX', 'RAVEN', 'OWL',
-    'BEAR', 'SHARK', 'NINJA', 'STORM', 'BLAZE', 'FROST',
-    'VIPER', 'EAGLE', 'LION', 'PANTHER', 'RAPTOR', 'KRAKEN'
-  ];
+  // Generate 6 random alphanumeric characters
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed confusing chars: 0OI1
+  let random = '';
+  for (let i = 0; i < 6; i++) {
+    random += chars[Math.floor(Math.random() * chars.length)];
+  }
   
   const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-  const suffix = suffixes[Math.floor(Math.random() * suffixes.length)];
-  const num = Math.floor(Math.random() * 100).toString().padStart(2, '0');
-  
-  return `${prefix}-${suffix}-${num}`;
+  return `${prefix}-${random}`;
+}
+
+// Generate unique code with collision check
+async function generateUniqueReferralCode(env) {
+  const maxAttempts = 10;
+  for (let i = 0; i < maxAttempts; i++) {
+    const code = generateReferralCode();
+    const existing = await env.DB.prepare(
+      'SELECT 1 FROM referrers WHERE referral_code = ?'
+    ).bind(code).first();
+    
+    if (!existing) {
+      return code;
+    }
+  }
+  // Fallback: add timestamp
+  return generateReferralCode() + '-' + Date.now().toString(36).slice(-4).toUpperCase();
 }
 
 
@@ -725,7 +739,7 @@ async function handleReferralRegister(request, env) {
     });
   }
   
-  const referralCode = generateReferralCode();
+  const referralCode = await generateUniqueReferralCode(env);
   
   await env.DB.prepare(`
     INSERT INTO referrers (referral_code, email, name, payout_email)
