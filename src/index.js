@@ -498,11 +498,57 @@ const PRICE_AMOUNTS = {
 
 const COMMISSION_RATE = 0.10;
 
+async function sendReferralEmail(email, name, referralCode, env) {
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: 'Your CX Linux Affiliate Referral Code',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #00FF9F;">Welcome to CX Linux Affiliates!</h1>
+            <p>Hi ${name || 'there'},</p>
+            <p>Your affiliate account has been created. Here is your referral code:</p>
+            <div style="background: #1E1E1E; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+              <span style="font-size: 28px; font-weight: bold; color: #00FF9F; font-family: monospace;">${referralCode}</span>
+            </div>
+            <p>Share this link with your network:</p>
+            <p style="background: #f5f5f5; padding: 10px; border-radius: 4px; word-break: break-all;">
+              <a href="https://cxlinux.com/?ref=${referralCode}">https://cxlinux.com/?ref=${referralCode}</a>
+            </p>
+            <h3>How it works:</h3>
+            <ul>
+              <li>Share your link with developers and teams</li>
+              <li>Earn <strong>10% commission</strong> on every subscription</li>
+              <li>Commissions are paid out monthly</li>
+            </ul>
+            <p>Check your stats anytime at <a href="https://cxlinux.com/affiliates">cxlinux.com/affiliates</a></p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="color: #666; font-size: 12px;">CX Linux - AI-Native Terminal</p>
+          </div>
+        `
+      })
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('Failed to send email:', e);
+    return false;
+  }
+}
+
+
 function generateReferralCode(name) {
   const prefix = name ? name.substring(0, 3).toUpperCase() : 'REF';
   const random = Math.random().toString(36).substring(2, 8).toUpperCase();
   return `${prefix}-${random}`;
 }
+
 
 async function handleReferralRegister(request, env) {
   const body = await request.json();
@@ -517,11 +563,12 @@ async function handleReferralRegister(request, env) {
   ).bind(email).first();
   
   if (existing) {
+    // Resend email for existing users
+    await sendReferralEmail(email, name || existing.name, existing.referral_code, env);
     return jsonResponse({
       success: true,
-      message: 'Already registered',
-      referral_code: existing.referral_code,
-      referral_link: `https://cxlinux.com/?ref=${existing.referral_code}`
+      message: 'Referral code sent to your email',
+      email_sent: true
     });
   }
   
@@ -532,11 +579,13 @@ async function handleReferralRegister(request, env) {
     VALUES (?, ?, ?, ?)
   `).bind(referralCode, email, name || null, payout_email || email).run();
   
+  // Send email with referral code
+  const emailSent = await sendReferralEmail(email, name, referralCode, env);
+  
   return jsonResponse({
     success: true,
-    referral_code: referralCode,
-    referral_link: `https://cxlinux.com/?ref=${referralCode}`,
-    commission_rate: '10%'
+    message: emailSent ? 'Referral code sent to your email' : 'Registration successful',
+    email_sent: emailSent
   });
 }
 
