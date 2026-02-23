@@ -317,6 +317,11 @@ async function handleStripeWebhook(request, env) {
           `).bind(licenseKey, tier, `stripe_${customerId}`, customerEmail, systemsAllowed, expiresAt.toISOString(), subscriptionId, customerId, referralCode).run();
           console.log(`Created license ${licenseKey} for ${customerEmail}`);
           
+          // Send license email to customer
+          if (customerEmail) {
+            await sendPaidLicenseEmail(customerEmail, licenseKey, tier, systemsAllowed, env);
+          }
+          
           // Process referral if applicable
           if (referralCode) {
             const license = await env.DB.prepare(
@@ -859,6 +864,94 @@ async function sendLicenseWelcomeEmail(email, name, licenseKey, env) {
     return response.ok;
   } catch (e) {
     console.error('Failed to send license welcome email:', e);
+    return false;
+  }
+}
+
+// Send email for paid subscription license
+async function sendPaidLicenseEmail(email, licenseKey, tier, systemsAllowed, env) {
+  const tierNames = {
+    'core': 'Core',
+    'pro': 'Pro',
+    'team': 'Team',
+    'enterprise': 'Enterprise'
+  };
+  const tierName = tierNames[tier] || tier.charAt(0).toUpperCase() + tier.slice(1);
+  
+  const tierFeatures = {
+    'pro': [
+      'Up to 5 server activations',
+      'Cloud LLMs (GPT-4, Claude)',
+      'Web console dashboard',
+      'Email support (24h response)',
+      'API access',
+      'Commercial license'
+    ],
+    'team': [
+      'Up to 25 server activations',
+      'Everything in Pro',
+      'Team workspaces',
+      'Role-based access control',
+      'Shared command history',
+      'Priority support (4h response)'
+    ],
+    'enterprise': [
+      'Up to 100 server activations',
+      'Everything in Team',
+      'SSO/SAML/LDAP integration',
+      'Audit logs & compliance',
+      'SOC2 & HIPAA reports',
+      '99.9% SLA guarantee',
+      'Dedicated account manager'
+    ]
+  };
+  
+  const features = tierFeatures[tier] || [`Up to ${systemsAllowed} server activations`];
+  const featuresList = features.map(f => `<li>${f}</li>`).join('');
+  
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: `Welcome to CX Linux ${tierName} - Your License Key`,
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #00FF9F;">Thank You for Subscribing!</h1>
+            <p>Your CX Linux <strong>${tierName}</strong> subscription is now active.</p>
+            <p>Here's your license key:</p>
+            <div style="background: #1E1E1E; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+              <span style="font-size: 20px; font-weight: bold; color: #00FF9F; font-family: monospace;">${licenseKey}</span>
+            </div>
+            <h3>Getting Started:</h3>
+            <ol>
+              <li>Install CX Terminal from <a href="https://cxlinux.com/getting-started">cxlinux.com/getting-started</a></li>
+              <li>Open a terminal and run:<br>
+                <code style="background: #f5f5f5; padding: 4px 8px; border-radius: 4px;">cx license activate ${licenseKey}</code>
+              </li>
+              <li>Start using AI-powered terminal commands!</li>
+            </ol>
+            <h3>Your ${tierName} Plan Includes:</h3>
+            <ul>
+              ${featuresList}
+            </ul>
+            <p>Manage your subscription at <a href="https://cxlinux.com/account">cxlinux.com/account</a></p>
+            <p>Need help? Contact <a href="mailto:support@cxlinux.com">support@cxlinux.com</a></p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="color: #666; font-size: 12px;">CX Linux - AI-Native Terminal | <a href="https://cxlinux.com">cxlinux.com</a></p>
+          </div>
+        `
+      })
+    });
+    console.log(`Sent license email to ${email}: ${response.ok}`);
+    return response.ok;
+  } catch (e) {
+    console.error('Failed to send paid license email:', e);
     return false;
   }
 }
