@@ -9,7 +9,7 @@ compatibility_flags = ["nodejs_compat"]
 [[d1_databases]]
 binding = "DB"
 database_name = "cx-licenses"
-database_id = "1ad91f25-68cc-4614-8e08-5b56d4a4a522"
+database_id = "d51ba087-2356-4d95-a1c3-ce7f0d6dc8c1"
 
 [vars]
 ENVIRONMENT = "production"
