@@ -1,5 +1,5 @@
 // CX Linux License Server with Referral System
-// Version 1.2.0
+// Version 1.2.1
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -762,12 +762,13 @@ export default {
       }
 
       // Health check
-      if (path === "/health" || path === "/") {
+      if (path === "/health" || path === "/api/v1/health" || path === "/") {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.2.0",
-          features: ["licensing", "referrals", "stripe-webhooks"]
+          version: "1.2.1",
+          features: ["licensing", "referrals", "stripe-webhooks"],
+          timestamp: new Date().toISOString()
         });
       }
 
