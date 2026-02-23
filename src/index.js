@@ -449,6 +449,14 @@ var index_default = {
       if (path === "/admin/create-license" && request.method === "POST") {
         return handleCreateLicense(request, env);
       }
+      // Free License Registration (OTP flow)
+      if (path === "/api/v1/licenses/send-otp" && request.method === "POST") {
+        return handleLicenseSendOTP(request, env);
+      }
+      if (path === "/api/v1/licenses/verify-otp" && request.method === "POST") {
+        return handleLicenseVerifyOTP(request, env);
+      }
+
       // Referral endpoints
       // OTP Verification Flow
       if (path === "/api/v1/referrals/send-otp" && request.method === "POST") {
@@ -634,6 +642,225 @@ async function handleVerifyOTP(request, env) {
     referral_link: `https://cxlinux.com/?ref=${referralCode}`,
     commission_rate: '10%'
   });
+}
+
+// ============================================
+// FREE LICENSE REGISTRATION (OTP)
+// ============================================
+
+async function handleLicenseSendOTP(request, env) {
+  const body = await request.json();
+  const { email, name } = body;
+  
+  if (!email) {
+    return errorResponse('Email is required');
+  }
+  
+  if (!name) {
+    return errorResponse('Name is required');
+  }
+  
+  // Check if user already has a license
+  const existingLicense = await env.DB.prepare(
+    'SELECT * FROM licenses WHERE customer_email = ?'
+  ).bind(email.toLowerCase()).first();
+  
+  if (existingLicense) {
+    // Return existing license instead of creating new OTP
+    return jsonResponse({
+      success: true,
+      existing: true,
+      message: 'You already have a license. Check your email for the license key.',
+      license_key: existingLicense.license_key,
+      tier: existingLicense.tier
+    });
+  }
+  
+  const otp = generateOTP();
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
+  
+  // Store OTP in database (reuse otp_codes table)
+  await env.DB.prepare(`
+    INSERT OR REPLACE INTO otp_codes (email, otp, name, expires_at)
+    VALUES (?, ?, ?, ?)
+  `).bind(email.toLowerCase(), otp, name, expiresAt).run();
+  
+  // Send OTP email
+  const emailSent = await sendLicenseOTPEmail(email, name, otp, env);
+  
+  if (!emailSent) {
+    return errorResponse('Failed to send verification email');
+  }
+  
+  return jsonResponse({
+    success: true,
+    message: 'Verification code sent to your email'
+  });
+}
+
+async function sendLicenseOTPEmail(email, name, otp, env) {
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: 'Your CX Linux Verification Code',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #00FF9F;">Verify Your Email</h1>
+            <p>Hi ${name},</p>
+            <p>Use this code to complete your CX Linux registration:</p>
+            <div style="background: #1E1E1E; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+              <span style="font-size: 32px; font-weight: bold; color: #00FF9F; letter-spacing: 4px; font-family: monospace;">${otp}</span>
+            </div>
+            <p style="color: #666;">This code expires in 10 minutes.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="color: #666; font-size: 12px;">CX Linux - AI-Native Terminal</p>
+          </div>
+        `
+      })
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('Failed to send license OTP email:', e);
+    return false;
+  }
+}
+
+async function handleLicenseVerifyOTP(request, env) {
+  const body = await request.json();
+  const { email, otp } = body;
+  
+  if (!email || !otp) {
+    return errorResponse('Email and verification code are required');
+  }
+  
+  // Get stored OTP
+  const stored = await env.DB.prepare(
+    'SELECT * FROM otp_codes WHERE email = ?'
+  ).bind(email.toLowerCase()).first();
+  
+  if (!stored) {
+    return errorResponse('No verification code found. Please request a new one.');
+  }
+  
+  if (Date.now() > stored.expires_at) {
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    return errorResponse('Verification code expired. Please request a new one.');
+  }
+  
+  if (stored.otp !== otp) {
+    return errorResponse('Invalid verification code');
+  }
+  
+  // Check if user already has a license (race condition check)
+  const existingLicense = await env.DB.prepare(
+    'SELECT * FROM licenses WHERE customer_email = ?'
+  ).bind(email.toLowerCase()).first();
+  
+  if (existingLicense) {
+    await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+    return jsonResponse({
+      success: true,
+      existing: true,
+      license_key: existingLicense.license_key,
+      tier: existingLicense.tier,
+      message: 'You already have a license'
+    });
+  }
+  
+  // Create free (Core) tier license
+  const licenseKey = generateLicenseKey();
+  const expiresAt = new Date();
+  expiresAt.setFullYear(expiresAt.getFullYear() + 100); // Free tier never expires (effectively)
+  
+  await env.DB.prepare(`
+    INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at)
+    VALUES (?, 'core', ?, ?, 1, ?)
+  `).bind(licenseKey, email.toLowerCase(), email.toLowerCase(), expiresAt.toISOString()).run();
+  
+  // Clean up used OTP
+  await env.DB.prepare('DELETE FROM otp_codes WHERE email = ?').bind(email.toLowerCase()).run();
+  
+  // Send welcome email with license key
+  await sendLicenseWelcomeEmail(email, stored.name, licenseKey, env);
+  
+  return jsonResponse({
+    success: true,
+    license_key: licenseKey,
+    tier: 'core',
+    message: 'License created successfully! Check your email for activation instructions.',
+    systems_allowed: 1
+  });
+}
+
+function generateLicenseKey() {
+  // Format: CX-XXXX-XXXX-XXXX-XXXX
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  const segments = [];
+  for (let s = 0; s < 4; s++) {
+    let segment = '';
+    for (let i = 0; i < 4; i++) {
+      segment += chars[Math.floor(Math.random() * chars.length)];
+    }
+    segments.push(segment);
+  }
+  return 'CX-' + segments.join('-');
+}
+
+async function sendLicenseWelcomeEmail(email, name, licenseKey, env) {
+  try {
+    const response = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: 'Welcome to CX Linux - Your License Key',
+        html: `
+          <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <h1 style="color: #00FF9F;">Welcome to CX Linux!</h1>
+            <p>Hi ${name || 'there'},</p>
+            <p>Your free CX Linux license has been created. Here's your license key:</p>
+            <div style="background: #1E1E1E; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0;">
+              <span style="font-size: 20px; font-weight: bold; color: #00FF9F; font-family: monospace;">${licenseKey}</span>
+            </div>
+            <h3>Getting Started:</h3>
+            <ol>
+              <li>Install CX Terminal from <a href="https://cxlinux.com/getting-started">cxlinux.com/getting-started</a></li>
+              <li>Open a terminal and run:<br>
+                <code style="background: #f5f5f5; padding: 4px 8px; border-radius: 4px;">cx license activate ${licenseKey}</code>
+              </li>
+              <li>Start using AI-powered terminal commands!</li>
+            </ol>
+            <h3>Your Free Tier Includes:</h3>
+            <ul>
+              <li>1 system activation</li>
+              <li>3 built-in AI agents</li>
+              <li>50 AI queries per day</li>
+              <li>Local LLM support (Ollama)</li>
+              <li>7-day command history</li>
+            </ul>
+            <p>Want more? Upgrade anytime at <a href="https://cxlinux.com/pricing">cxlinux.com/pricing</a></p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="color: #666; font-size: 12px;">CX Linux - AI-Native Terminal | <a href="https://cxlinux.com">cxlinux.com</a></p>
+          </div>
+        `
+      })
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('Failed to send license welcome email:', e);
+    return false;
+  }
 }
 
 // ============================================
