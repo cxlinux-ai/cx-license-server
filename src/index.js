@@ -682,21 +682,14 @@ async function sendReferralEmail(email, name, referralCode, env) {
 
 
 function generateReferralCode() {
-  const prefixes = [
-    'SUDO', 'ROOT', 'BASH', 'GREP', 'PIPE', 'CHMOD', 
-    'KERNEL', 'SHELL', 'FORK', 'DAEMON', 'NANO',
-    'VIM', 'APT', 'SSH', 'GIT', 'CURL', 'TAR', 'AWK'
-  ];
-  
-  // Generate 6 random alphanumeric characters
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed confusing chars: 0OI1
-  let random = '';
+  // Simple 6-character alphanumeric code
+  // 32^6 = 1 billion+ combinations
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Removed confusing: 0OI1
+  let code = '';
   for (let i = 0; i < 6; i++) {
-    random += chars[Math.floor(Math.random() * chars.length)];
+    code += chars[Math.floor(Math.random() * chars.length)];
   }
-  
-  const prefix = prefixes[Math.floor(Math.random() * prefixes.length)];
-  return `${prefix}-${random}`;
+  return code;
 }
 
 // Generate unique code with collision check
