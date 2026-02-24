@@ -88,13 +88,13 @@ async function getActiveDeviceCount(db: D1Database, licenseId: number): Promise<
 
 function getTierFeatures(tier: string): string[] {
   const features: Record<string, string[]> = {
-    community: ["cx-ask", "cx-status", "local-llm"],
+    core: ["cx-ask", "cx-status", "local-llm"],
     core: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "email-support"],
     pro: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "priority-support", "api-access"],
     enterprise: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "sso", "audit-log", "compliance", "dedicated-support"],
     managed: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "sso", "audit-log", "compliance", "dedicated-support", "custom-features", "sla"]
   };
-  return features[tier] || features.community;
+  return features[tier] || features.core;
 }
 
 // ============================================
