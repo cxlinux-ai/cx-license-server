@@ -1,5 +1,5 @@
 // CX Linux License Server with Referral System
-// Version 1.3.0
+// Version 1.4.0
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -18,12 +18,12 @@ interface Env {
 // REFERRAL CONSTANTS
 // ============================================
 const PRICE_AMOUNTS: Record<string, number> = {
-  'price_1SqYQjJ4X1wkC4EsLDB6ZbOk': 20,    // Core+ monthly
-  'price_1SqYQjJ4X1wkC4EslIkZEJFZ': 200,   // Core+ annual
-  'price_1SqYQkJ4X1wkC4Es8OMt79pZ': 99,    // Pro+ monthly
-  'price_1SqYQkJ4X1wkC4EsWYwUgceu': 990,   // Pro+ annual
-  'price_1SqYQkJ4X1wkC4EsCFVBHYnT': 299,   // Enterprise+ monthly
-  'price_1SqYQlJ4X1wkC4EsJcPW7Of2': 2990,  // Enterprise+ annual
+  'price_1SqYQjJ4X1wkC4EsLDB6ZbOk': 20,    // Pro monthly ($20)
+  'price_1SqYQjJ4X1wkC4EslIkZEJFZ': 200,   // Pro annual ($200)
+  'price_1SqYQkJ4X1wkC4Es8OMt79pZ': 99,    // Team monthly ($99)
+  'price_1SqYQkJ4X1wkC4EsWYwUgceu': 990,   // Team annual ($990)
+  'price_1SqYQkJ4X1wkC4EsCFVBHYnT': 299,   // Enterprise monthly ($299)
+  'price_1SqYQlJ4X1wkC4EsJcPW7Of2': 2990,  // Enterprise annual ($2990)
 };
 
 const COMMISSION_RATE = 0.10; // 10%
@@ -89,9 +89,10 @@ async function getActiveDeviceCount(db: D1Database, licenseId: number): Promise<
 function getTierFeatures(tier: string): string[] {
   const features: Record<string, string[]> = {
     core: ["cx-ask", "cx-status", "local-llm"],
-    pro: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "email-support", "priority-support", "api-access"],
-    enterprise: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "sso", "audit-log", "compliance", "dedicated-support"],
-    managed: ["cx-ask", "cx-status", "cx-demo", "cloud-llm", "sso", "audit-log", "compliance", "dedicated-support", "custom-features", "sla"]
+    pro: ["cx-ask", "cx-status", "cx-demo", "local-llm", "external-apis", "email-support", "api-access"],
+    team: ["cx-ask", "cx-status", "cx-demo", "local-llm", "cloud-llm", "external-apis", "email-support", "api-access", "team-dashboard", "audit-log"],
+    enterprise: ["cx-ask", "cx-status", "cx-demo", "local-llm", "cloud-llm", "external-apis", "sso", "audit-log", "compliance", "dedicated-support", "api-access"],
+    managed: ["cx-ask", "cx-status", "cx-demo", "local-llm", "cloud-llm", "external-apis", "sso", "audit-log", "compliance", "dedicated-support", "api-access", "custom-features", "sla"]
   };
   return features[tier] || features.core;
 }
@@ -581,15 +582,19 @@ async function handleStripeWebhook(request: Request, env: Env) {
         let tier = "core";
         let systemsAllowed = 2;
 
+        // Determine tier and systems_allowed based on Stripe Price ID
         if (priceId === "price_1SqYQkJ4X1wkC4EsCFVBHYnT" || priceId === "price_1SqYQlJ4X1wkC4EsJcPW7Of2") {
+          // Enterprise: $299/mo or $2990/yr - unlimited systems
           tier = "enterprise";
-          systemsAllowed = 100;
+          systemsAllowed = 9999;
         } else if (priceId === "price_1SqYQkJ4X1wkC4Es8OMt79pZ" || priceId === "price_1SqYQkJ4X1wkC4EsWYwUgceu") {
-          tier = "pro";
+          // Team: $99/mo or $990/yr - 25 systems
+          tier = "team";
           systemsAllowed = 25;
         } else if (priceId === "price_1SqYQjJ4X1wkC4EsLDB6ZbOk" || priceId === "price_1SqYQjJ4X1wkC4EslIkZEJFZ") {
-          tier = "core";
-          systemsAllowed = 2;
+          // Pro: $20/mo or $200/yr - 5 systems
+          tier = "pro";
+          systemsAllowed = 5;
         }
 
         const licenseKey = `CX-${tier.toUpperCase()}-${generateRandomString(4)}-${generateRandomString(4)}-${generateRandomString(4)}-${generateRandomString(4)}`;
@@ -988,7 +993,7 @@ export default {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.3.0",
+          version: "1.4.0",
           features: ["licensing", "referrals", "stripe-webhooks", "otp-verification"],
           timestamp: new Date().toISOString()
         });
