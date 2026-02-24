@@ -1,5 +1,5 @@
 // CX Linux License Server with Referral System
-// Version 1.4.0
+// Version 1.5.0
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -922,6 +922,93 @@ async function handleReferralVerifyOtp(request: Request, env: Env) {
 }
 
 // ============================================
+// ENTERPRISE: AUDIT LOG HANDLERS
+// ============================================
+
+// Get audit logs for a license (requires Team/Enterprise tier)
+async function handleGetAuditLogs(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { license_key, limit = 100, offset = 0 } = body;
+
+  if (!license_key) {
+    return errorResponse("License key is required");
+  }
+
+  // Verify license and check tier
+  const license = await env.DB.prepare(
+    "SELECT * FROM licenses WHERE license_key = ? AND active = 1"
+  ).bind(license_key).first<any>();
+
+  if (!license) {
+    return errorResponse("Invalid license key", 401);
+  }
+
+  // Check if tier has audit-log feature
+  const features = getTierFeatures(license.tier);
+  if (!features.includes("audit-log")) {
+    return errorResponse("Audit logs require Team or Enterprise tier", 403);
+  }
+
+  // Get audit logs
+  const logs = await env.DB.prepare(`
+    SELECT action, success, error_message, ip_address, user_agent, created_at
+    FROM validation_log 
+    WHERE license_key = ?
+    ORDER BY created_at DESC
+    LIMIT ? OFFSET ?
+  `).bind(license_key, limit, offset).all();
+
+  return jsonResponse({
+    success: true,
+    license_key,
+    tier: license.tier,
+    logs: logs.results || [],
+    count: logs.results?.length || 0
+  });
+}
+
+// Record a custom audit event (requires Team/Enterprise tier)
+async function handleRecordAuditEvent(request: Request, env: Env) {
+  const body = await request.json() as any;
+  const { license_key, action, details, hardware_id } = body;
+
+  if (!license_key || !action) {
+    return errorResponse("License key and action are required");
+  }
+
+  // Verify license and check tier
+  const license = await env.DB.prepare(
+    "SELECT * FROM licenses WHERE license_key = ? AND active = 1"
+  ).bind(license_key).first<any>();
+
+  if (!license) {
+    return errorResponse("Invalid license key", 401);
+  }
+
+  // Check if tier has audit-log feature
+  const features = getTierFeatures(license.tier);
+  if (!features.includes("audit-log")) {
+    return errorResponse("Audit logs require Team or Enterprise tier", 403);
+  }
+
+  // Log the event
+  await logValidation(
+    env.DB, 
+    license_key, 
+    hardware_id || null, 
+    action, 
+    true, 
+    details ? JSON.stringify(details) : null, 
+    request
+  );
+
+  return jsonResponse({
+    success: true,
+    message: "Audit event recorded"
+  });
+}
+
+// ============================================
 // MAIN ROUTER
 // ============================================
 export default {
@@ -988,13 +1075,21 @@ export default {
         return handleMarkPaid(request, env);
       }
 
+      // Enterprise: Audit log endpoints (requires Team or Enterprise tier)
+      if (path === "/api/v1/audit/logs" && request.method === "POST") {
+        return handleGetAuditLogs(request, env);
+      }
+      if (path === "/api/v1/audit/log" && request.method === "POST") {
+        return handleRecordAuditEvent(request, env);
+      }
+
       // Health check
       if (path === "/health" || path === "/api/v1/health" || path === "/") {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.4.0",
-          features: ["licensing", "referrals", "stripe-webhooks", "otp-verification"],
+          version: "1.5.0",
+          features: ["licensing", "referrals", "stripe-webhooks", "otp-verification", "audit-logs"],
           timestamp: new Date().toISOString()
         });
       }
