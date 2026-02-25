@@ -1000,10 +1000,14 @@ async function sendWelcomeEmail(email: string, licenseKey: string, tier: string,
 
       <div style="background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; margin: 20px 0;">
         <h3 style="color: #00FF9F; margin: 0 0 16px 0;">Getting Started</h3>
-        <p style="margin: 0 0 12px 0;"><strong>1. Install CX Linux</strong></p>
-        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0 16px 0; color: #00FF9F;">curl -fsSL https://cxlinux.com/install | bash</code>
+        <p style="margin: 0 0 12px 0;"><strong>1. Add CX Linux APT Repository</strong></p>
+        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0 8px 0; color: #00FF9F; font-size: 13px;">curl -fsSL https://repo.cxlinux.com/key.gpg | sudo gpg --dearmor -o /etc/apt/keyrings/cxlinux.gpg</code>
+        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0 16px 0; color: #00FF9F; font-size: 13px;">echo "deb [signed-by=/etc/apt/keyrings/cxlinux.gpg] https://repo.cxlinux.com/apt stable main" | sudo tee /etc/apt/sources.list.d/cxlinux.list</code>
         
-        <p style="margin: 0 0 12px 0;"><strong>2. Activate your license</strong></p>
+        <p style="margin: 0 0 12px 0;"><strong>2. Install CX Terminal</strong></p>
+        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0 16px 0; color: #00FF9F;">sudo apt update && sudo apt install cx-terminal</code>
+        
+        <p style="margin: 0 0 12px 0;"><strong>3. Activate your license</strong></p>
         <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0; color: #00FF9F;">cx activate ${licenseKey}</code>
       </div>
 
@@ -1385,7 +1389,7 @@ export default {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.7.0",
+          version: "1.7.1",
           features: ["licensing", "referrals", "stripe-checkout", "stripe-webhooks", "otp-verification", "audit-logs"],
           timestamp: new Date().toISOString()
         });
