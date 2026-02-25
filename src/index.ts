@@ -9,6 +9,7 @@ const corsHeaders = {
 
 interface Env {
   DB: D1Database;
+  STRIPE_SECRET_KEY: string;
   STRIPE_WEBHOOK_SECRET: string;
   ADMIN_API_KEY: string;
   RESEND_API_KEY: string;
@@ -27,6 +28,22 @@ const PRICE_AMOUNTS: Record<string, number> = {
 };
 
 const COMMISSION_RATE = 0.10; // 10%
+
+// Stripe Price IDs for each plan
+const STRIPE_PRICE_IDS: Record<string, { monthly: string; annual: string }> = {
+  pro: {
+    monthly: 'price_1SqYQjJ4X1wkC4EsLDB6ZbOk',
+    annual: 'price_1SqYQjJ4X1wkC4EslIkZEJFZ'
+  },
+  team: {
+    monthly: 'price_1SqYQkJ4X1wkC4Es8OMt79pZ',
+    annual: 'price_1SqYQkJ4X1wkC4EsWYwUgceu'
+  },
+  enterprise: {
+    monthly: 'price_1SqYQkJ4X1wkC4EsCFVBHYnT',
+    annual: 'price_1SqYQlJ4X1wkC4EsJcPW7Of2'
+  },
+};
 
 // ============================================
 // HELPERS
@@ -500,6 +517,200 @@ async function handleMarkPaid(request: Request, env: Env) {
     referral_code,
     amount_paid: (unpaid?.amount || 0).toFixed(2)
   });
+}
+
+// ============================================
+// STRIPE CHECKOUT SESSION
+// ============================================
+async function handleCreateCheckoutSession(request: Request, env: Env) {
+  if (!env.STRIPE_SECRET_KEY) {
+    return errorResponse("Stripe is not configured", 503);
+  }
+
+  const body = await request.json() as any;
+  const { email, name, planId, billingCycle, referralCode, successUrl, cancelUrl } = body;
+
+  if (!email || !planId) {
+    return errorResponse("email and planId are required");
+  }
+
+  const priceConfig = STRIPE_PRICE_IDS[planId];
+  if (!priceConfig) {
+    return errorResponse("Invalid plan ID");
+  }
+
+  const priceId = billingCycle === "annual" ? priceConfig.annual : priceConfig.monthly;
+
+  try {
+    // Create or get Stripe customer
+    const customersResponse = await fetch(
+      `https://api.stripe.com/v1/customers?email=${encodeURIComponent(email)}&limit=1`,
+      {
+        headers: {
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+        },
+      }
+    );
+    const customersData = await customersResponse.json() as any;
+
+    let customerId: string;
+    if (customersData.data && customersData.data.length > 0) {
+      customerId = customersData.data[0].id;
+    } else {
+      // Create new customer
+      const createCustomerResponse = await fetch('https://api.stripe.com/v1/customers', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
+          email,
+          name: name || '',
+          'metadata[planId]': planId,
+          'metadata[billingCycle]': billingCycle || 'monthly',
+        }).toString(),
+      });
+      const newCustomer = await createCustomerResponse.json() as any;
+      if (newCustomer.error) {
+        return errorResponse(newCustomer.error.message, 400);
+      }
+      customerId = newCustomer.id;
+    }
+
+    // Create checkout session
+    const sessionParams = new URLSearchParams({
+      'customer': customerId,
+      'mode': 'subscription',
+      'payment_method_types[0]': 'card',
+      'line_items[0][price]': priceId,
+      'line_items[0][quantity]': '1',
+      'success_url': successUrl || 'https://cxlinux.com/pricing/success?session_id={CHECKOUT_SESSION_ID}',
+      'cancel_url': cancelUrl || 'https://cxlinux.com/pricing',
+      'allow_promotion_codes': 'true',
+      'billing_address_collection': 'auto',
+      'metadata[planId]': planId,
+      'metadata[billingCycle]': billingCycle || 'monthly',
+      'subscription_data[metadata][planId]': planId,
+      'subscription_data[metadata][billingCycle]': billingCycle || 'monthly',
+    });
+
+    if (referralCode) {
+      sessionParams.append('metadata[ref]', referralCode);
+      sessionParams.append('subscription_data[metadata][ref]', referralCode);
+    }
+
+    const sessionResponse = await fetch('https://api.stripe.com/v1/checkout/sessions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: sessionParams.toString(),
+    });
+
+    const session = await sessionResponse.json() as any;
+
+    if (session.error) {
+      console.error('Stripe error:', session.error);
+      return errorResponse(session.error.message, 400);
+    }
+
+    console.log(`Created checkout session: ${session.id} for ${email}`);
+    return jsonResponse({ url: session.url, sessionId: session.id });
+  } catch (error) {
+    console.error('Checkout session error:', error);
+    return errorResponse('Failed to create checkout session', 500);
+  }
+}
+
+// ============================================
+// STRIPE SESSION RETRIEVAL
+// ============================================
+async function handleGetCheckoutSession(request: Request, env: Env, sessionId: string) {
+  if (!env.STRIPE_SECRET_KEY) {
+    return errorResponse("Stripe is not configured", 503);
+  }
+
+  try {
+    // Retrieve session from Stripe
+    const sessionResponse = await fetch(
+      `https://api.stripe.com/v1/checkout/sessions/${sessionId}?expand[]=subscription&expand[]=customer&expand[]=line_items`,
+      {
+        headers: {
+          'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
+        },
+      }
+    );
+
+    const session = await sessionResponse.json() as any;
+
+    if (session.error) {
+      return errorResponse(session.error.message, 404);
+    }
+
+    const customer = session.customer as any;
+    const subscription = session.subscription as any;
+    const lineItems = session.line_items?.data || [];
+    const priceId = lineItems[0]?.price?.id || '';
+
+    // Determine plan name from price ID
+    let planName = 'Pro';
+    if (priceId.includes('Team') || priceId === 'price_1SqYQkJ4X1wkC4Es8OMt79pZ' || priceId === 'price_1SqYQkJ4X1wkC4EsWYwUgceu') {
+      planName = 'Team';
+    } else if (priceId === 'price_1SqYQkJ4X1wkC4EsCFVBHYnT' || priceId === 'price_1SqYQlJ4X1wkC4EsJcPW7Of2') {
+      planName = 'Enterprise';
+    }
+
+    const customerEmail = customer?.email || session.customer_email || '';
+
+    // Try to find the license key (may have been created by webhook)
+    let licenseKey = null;
+    if (customerEmail) {
+      const license = await env.DB.prepare(
+        "SELECT license_key FROM licenses WHERE customer_email = ? AND active = 1 ORDER BY created_at DESC LIMIT 1"
+      ).bind(customerEmail).first<any>();
+      if (license) {
+        licenseKey = license.license_key;
+      }
+    }
+
+    // Also check by subscription ID
+    if (!licenseKey && subscription?.id) {
+      const license = await env.DB.prepare(
+        "SELECT license_key FROM licenses WHERE stripe_subscription_id = ? AND active = 1 LIMIT 1"
+      ).bind(subscription.id).first<any>();
+      if (license) {
+        licenseKey = license.license_key;
+      }
+    }
+
+    let trialEnds = "N/A";
+    if (subscription?.trial_end) {
+      const trialEndDate = new Date(subscription.trial_end * 1000);
+      trialEnds = trialEndDate.toLocaleDateString("en-US", {
+        month: "long",
+        day: "numeric",
+        year: "numeric",
+      });
+    }
+
+    const billingCycle = session.metadata?.billingCycle || 
+      (subscription?.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly');
+
+    return jsonResponse({
+      email: customerEmail,
+      planName,
+      billingCycle,
+      trialEnds,
+      status: session.status,
+      subscriptionId: subscription?.id,
+      licenseKey,
+    });
+  } catch (error) {
+    console.error('Get session error:', error);
+    return errorResponse('Failed to retrieve session', 500);
+  }
 }
 
 // ============================================
@@ -1059,6 +1270,16 @@ export default {
         return handleReferralVerifyOtp(request, env);
       }
 
+      // Stripe checkout
+      if (path === "/api/v1/stripe/checkout-session" && request.method === "POST") {
+        return handleCreateCheckoutSession(request, env);
+      }
+      // Get checkout session details (for success page)
+      if (path.startsWith("/api/v1/stripe/checkout-session/") && request.method === "GET") {
+        const sessionId = path.replace("/api/v1/stripe/checkout-session/", "");
+        return handleGetCheckoutSession(request, env, sessionId);
+      }
+
       // Webhook
       if (path === "/webhooks/stripe" && request.method === "POST") {
         return handleStripeWebhook(request, env);
@@ -1088,8 +1309,8 @@ export default {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.5.0",
-          features: ["licensing", "referrals", "stripe-webhooks", "otp-verification", "audit-logs"],
+          version: "1.6.0",
+          features: ["licensing", "referrals", "stripe-checkout", "stripe-webhooks", "otp-verification", "audit-logs"],
           timestamp: new Date().toISOString()
         });
       }
