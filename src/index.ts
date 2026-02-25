@@ -839,6 +839,11 @@ async function handleStripeWebhook(request: Request, env: Env) {
               await processReferral(env, license.id, priceId, referralCode);
             }
           }
+
+          // Send welcome email with license key
+          if (customerEmail) {
+            await sendWelcomeEmail(customerEmail, licenseKey, tier, env);
+          }
         }
         break;
       }
@@ -967,6 +972,77 @@ async function sendOtpEmail(email: string, otp: string, type: 'license' | 'refer
     return res.ok;
   } catch (e) {
     console.error('Failed to send OTP email:', e);
+    return false;
+  }
+}
+
+async function sendWelcomeEmail(email: string, licenseKey: string, tier: string, env: Env): Promise<boolean> {
+  const tierNames: Record<string, string> = {
+    'pro': 'CX Pro',
+    'team': 'CX Team',
+    'enterprise': 'CX Enterprise'
+  };
+  const tierName = tierNames[tier] || 'CX Linux';
+
+  const html = `
+    <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background: #0a0a0a; color: #e5e5e5;">
+      <div style="text-align: center; margin-bottom: 30px;">
+        <h1 style="color: #00FF9F; margin: 0;">Welcome to CX Linux!</h1>
+        <p style="color: #888;">Your ${tierName} subscription is now active</p>
+      </div>
+      
+      <div style="background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; margin: 20px 0;">
+        <p style="margin: 0 0 12px 0; color: #888; font-size: 14px;">Your License Key:</p>
+        <div style="background: #0d0d0d; padding: 16px; border-radius: 8px; text-align: center;">
+          <code style="font-size: 18px; color: #00FF9F; letter-spacing: 2px; word-break: break-all;">${licenseKey}</code>
+        </div>
+      </div>
+
+      <div style="background: #1a1a1a; border: 1px solid #333; border-radius: 12px; padding: 24px; margin: 20px 0;">
+        <h3 style="color: #00FF9F; margin: 0 0 16px 0;">Getting Started</h3>
+        <p style="margin: 0 0 12px 0;"><strong>1. Install CX Linux</strong></p>
+        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0 16px 0; color: #00FF9F;">curl -fsSL https://cxlinux.com/install | bash</code>
+        
+        <p style="margin: 0 0 12px 0;"><strong>2. Activate your license</strong></p>
+        <code style="background: #0d0d0d; padding: 8px 12px; border-radius: 4px; display: block; margin: 8px 0; color: #00FF9F;">cx activate ${licenseKey}</code>
+      </div>
+
+      <div style="text-align: center; margin: 30px 0; padding: 20px; border-top: 1px solid #333;">
+        <p style="color: #888; margin: 0 0 16px 0;">Need help? Check our docs or join our community:</p>
+        <a href="https://docs.cxlinux.com" style="color: #00FF9F; text-decoration: none; margin: 0 12px;">Documentation</a>
+        <a href="https://discord.gg/cxlinux" style="color: #00FF9F; text-decoration: none; margin: 0 12px;">Discord</a>
+      </div>
+
+      <p style="color: #666; font-size: 12px; text-align: center; margin-top: 30px;">
+        © 2026 CX Linux. All rights reserved.<br>
+        <a href="https://cxlinux.com/terms" style="color: #666;">Terms</a> · <a href="https://cxlinux.com/privacy" style="color: #666;">Privacy</a>
+      </p>
+    </div>
+  `;
+
+  try {
+    const res = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        from: 'CX Linux <noreply@cxlinux.com>',
+        to: email,
+        subject: `Welcome to ${tierName}! Your license key inside`,
+        html
+      })
+    });
+    
+    if (res.ok) {
+      console.log(`Welcome email sent to ${email}`);
+    } else {
+      console.error('Failed to send welcome email:', await res.text());
+    }
+    return res.ok;
+  } catch (e) {
+    console.error('Failed to send welcome email:', e);
     return false;
   }
 }
@@ -1309,7 +1385,7 @@ export default {
         return jsonResponse({
           status: "ok",
           service: "CX Linux License Server",
-          version: "1.6.0",
+          version: "1.7.0",
           features: ["licensing", "referrals", "stripe-checkout", "stripe-webhooks", "otp-verification", "audit-logs"],
           timestamp: new Date().toISOString()
         });
