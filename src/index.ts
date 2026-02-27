@@ -841,6 +841,18 @@ async function handleStripeWebhook(request: Request, env: Env) {
           "SELECT id FROM licenses WHERE stripe_subscription_id = ?"
         ).bind(subscriptionId).first();
 
+        // Check if email already has an active license for this tier (prevent duplicate charges)
+        const existingByEmail = customerEmail ? await env.DB.prepare(
+          "SELECT license_key, stripe_subscription_id FROM licenses WHERE customer_email = ? AND tier = ? AND active = 1"
+        ).bind(customerEmail, tier).first<any>() : null;
+
+        if (existingByEmail) {
+          console.log(`⚠️ Duplicate prevention: ${customerEmail} already has active ${tier} license ${existingByEmail.license_key} (sub: ${existingByEmail.stripe_subscription_id}). New sub: ${subscriptionId}`);
+          // Don't create duplicate - existing license is still valid
+          // User may need to cancel old subscription in Stripe
+          break;
+        }
+
         if (!existing) {
           await env.DB.prepare(`
             INSERT INTO licenses (license_key, tier, customer_id, customer_email, systems_allowed, expires_at, stripe_subscription_id, stripe_customer_id, referral_code)
