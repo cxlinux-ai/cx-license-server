@@ -539,6 +539,15 @@ async function handleCreateCheckoutSession(request: Request, env: Env) {
     return errorResponse("Invalid plan ID");
   }
 
+  // Check if email already has an active license for this tier (prevent duplicate checkout)
+  const existingLicense = await env.DB.prepare(
+    "SELECT license_key FROM licenses WHERE customer_email = ? AND tier = ? AND active = 1"
+  ).bind(email, planId).first<any>();
+
+  if (existingLicense) {
+    return errorResponse(`You already have an active ${planId} license (${existingLicense.license_key}). Please manage your subscription from the billing portal.`, 409);
+  }
+
   const priceId = billingCycle === "annual" ? priceConfig.annual : priceConfig.monthly;
 
   try {
