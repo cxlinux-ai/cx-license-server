@@ -784,8 +784,26 @@ async function handleStripeWebhook(request: Request, env: Env) {
       case "customer.subscription.created":
       case "checkout.session.completed": {
         const customerId = data.customer;
-        const customerEmail = data.customer_email || data.receipt_email || "";
+        let customerEmail = data.customer_email || data.receipt_email || "";
         const priceId = data.items?.data?.[0]?.price?.id || data.line_items?.data?.[0]?.price?.id || "";
+        
+        // If no email in event, fetch from Stripe Customer
+        if (!customerEmail && customerId && env.STRIPE_SECRET_KEY) {
+          try {
+            const customerResponse = await fetch(
+              `https://api.stripe.com/v1/customers/${customerId}`,
+              {
+                headers: { 'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}` },
+              }
+            );
+            const customerData = await customerResponse.json() as any;
+            if (customerData.email) {
+              customerEmail = customerData.email;
+            }
+          } catch (e) {
+            console.error("Failed to fetch customer email:", e);
+          }
+        }
         const subscriptionId = data.subscription || data.id;
         
         // Get referral code from checkout session metadata or client_reference_id
