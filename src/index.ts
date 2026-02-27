@@ -699,6 +699,7 @@ async function handleGetCheckoutSession(request: Request, env: Env, sessionId: s
       (subscription?.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly');
 
     return jsonResponse({
+      success: true,
       email: customerEmail,
       planName,
       billingCycle,
